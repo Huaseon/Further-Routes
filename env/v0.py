@@ -39,7 +39,7 @@ CONFIG = {
     "service_time_offset_min": 1.0,
     "service_time_perkg_min": 0.5,
     # 需求生成（固定集）
-    "num_demands": 200,              # 固定需求数量
+    "num_demands": 20,              # 固定需求数量
     "demand_kg_minmax": (1.0, 3.0), # 投放量范围（kg）
     "seed": 200405081012,           # 随机种子
     # 调度策略
