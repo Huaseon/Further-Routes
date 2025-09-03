@@ -579,11 +579,11 @@ class SimplifiedEnv:
         return {
             "out_km": out_km,
             "deliver_kg": deliver_kg,
-            "t_go_s": t_go, "e_to_wh": e_go,
+            "t_go_s": t_go, "e_go_wh": e_go,
             "t_sv_s": t_sv, "e_sv_wh": e_sv,
             "t_rt_s": t_rt, "e_rt_wh": e_rt,
             "t_total_s": t_go + t_sv + t_rt,
-            "t_total_wh": e_go + e_sv + e_rt,
+            "e_total_wh": e_go + e_sv + e_rt,
         }
 
 def main():
