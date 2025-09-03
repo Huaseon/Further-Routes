@@ -4,6 +4,7 @@
 单架无人机（用于往返能耗与时耗校准）
 事件驱动：仅在无人机空闲时进行一次指派；飞行到达、服务完成、返仓等均通过事件推进
 能耗模型与参数采用默认数值
+无人机载重采取满载
 """
 
 # %%
@@ -323,28 +324,30 @@ class SimplifiedEnv:
         e_wh = self.energy_model.service_energy_wh(deliver_kg)
         return t_s, e_wh
 
-    def _estimate_roundtrip_energy(self, demand: Demand, deliver_kg: float) -> float:
+    def _estimate_roundtrip_energy(self, demand: Demand, load_kg: float, deliver_kg: float) -> float:
         """估计往返能耗（Wh）
         Args:
             demand: 需求对象
+            load_kg: 出发时载重（kg）
             deliver_kg: 投放量（kg）
         Returns:
             往返能耗（Wh）
         """
         e_total = 0.0
         # 去程
-        t_go, e_go = self._fly(self.depot_xy_m, demand.xy_m, deliver_kg)
+        t_go, e_go = self._fly(self.depot_xy_m, demand.xy_m, load_kg)
         # 服务
         t_service, e_service = self._service(deliver_kg)
         # 返程
-        t_return, e_return = self._fly(demand.xy_m, self.depot_xy_m, 0.0)
+        t_return, e_return = self._fly(demand.xy_m, self.depot_xy_m, load_kg - deliver_kg)
         e_total = e_go + e_service + e_return
         return e_total
     
-    def _feasible(self, demand: Demand, deliver_kg: float) -> bool:
+    def _feasible(self, demand: Demand, load_kg: float, deliver_kg: float) -> bool:
         """检查投放量的可行性
         Args:
             demand: 需求对象
+            load_kg: 出发时载重（kg）
             deliver_kg: 投放量（kg）
         Returns:
             可行性（True/False）"""
@@ -355,7 +358,7 @@ class SimplifiedEnv:
         if demand.is_done():
             return False
         # 估计往返能耗
-        est_e = self._estimate_roundtrip_energy(demand, deliver_kg)
+        est_e = self._estimate_roundtrip_energy(demand, load_kg, deliver_kg)
         return est_e <= self.uav.usable_energy_wh() and est_e <= self.uav.available_energy_wh()
     
     def _select_next_task(self) -> Optional[Tuple[int, float]]:
@@ -367,8 +370,8 @@ class SimplifiedEnv:
         for d in self.demands:
             if d.is_done():
                 continue
-            deliver = min(d.remaining_kg(), self.uav.payload_cap_kg)
-            if self._feasible(d, deliver):
+            deliver = min(d.remaining_kg(), self.uav.carrying_kg)
+            if self._feasible(d, self.uav.carrying_kg, deliver):
                 dist = distance_m(self.uav.xy_m, d.xy_m)
                 candidates.append((dist, d.did, deliver))
         if not candidates:
@@ -381,6 +384,10 @@ class SimplifiedEnv:
     def _handle_decision(self):
         """处理无人机空闲时的决策"""
         assert self.uav.status == "idle"
+        reloaded = self.uav.payload_cap_kg - self.uav.carrying_kg
+        self.uav.carrying_kg += reloaded  # 满载准备
+        self._log(f"Afater loading {reloaded:.2f}kg, UAV({self.uav.carrying_kg}kg) ready for next task.")
+
         choice = self._select_next_task()
         if choice is None:
             # 若任务均不可行但有未完成需求，尝试充电；否则结束
@@ -399,11 +406,11 @@ class SimplifiedEnv:
         did, deliver = choice
         demand = self.demands[did]
         self.uav.status = "enroute_to_task"
-        self.uav.carrying_kg = deliver
+        # self.uav.carrying_kg = self.uav.payload_cap_kg - self.uav.carrying_kg  # 满载起飞
         self.uav.current_task = did
 
         # 计算飞行时间与能耗
-        t_go, e_go = self._fly(self.uav.xy_m, demand.xy_m, deliver)
+        t_go, e_go = self._fly(self.uav.xy_m, demand.xy_m, self.uav.carrying_kg)
         # 记录并发出到达事件
         self._log(f"Dispatch to demand#{did}: deliver {deliver:.2f}kg | fly_go t={t_go:.1f}s e={e_go:.1f}Wh")
         # 资源更新延后至事件实际发生；这里仅安排事件
@@ -430,6 +437,7 @@ class SimplifiedEnv:
         self._log(f"Arrived demand#{did}: service deliver {deliver:.2f}kg | t={t_sv:.1f}s e={e_sv:.1f}Wh")
         # 服务更新
         demand.served_kg += deliver
+        self.uav.carrying_kg -= deliver
         self.uav.battery_wh -= e_sv
         self.uav.total_energy_wh += e_sv
         self.uav.total_service_time_s += t_sv
@@ -446,8 +454,8 @@ class SimplifiedEnv:
         delivered = payload["delivered"]
         self.uav.status = "returning"
         # 返程
-        t_rt, e_rt = self._fly(self.uav.xy_m, self.depot_xy_m, 0.0)
-        self._log(f"Service done demand#{did}, returning | fly_back t={t_rt:.1f}s e={e_rt:.1f}Wh")
+        t_rt, e_rt = self._fly(self.uav.xy_m, self.depot_xy_m, self.uav.carrying_kg)
+        self._log(f"Service done demand#{did}, returning | fly_back carrying {self.uav.carrying_kg:.2f}kg t={t_rt:.1f}s e={e_rt:.1f}Wh")
         self._push_event(self.now_s + t_rt, "arrive_depot", {"did": did, "delivered": delivered, "e_rt": e_rt, "t_rt": t_rt})
 
     def _handle_arrive_depot(self, payload: dict):
@@ -467,11 +475,11 @@ class SimplifiedEnv:
         self.uav.total_distance_m += distance_m(self.demands[did].xy_m, self.depot_xy_m)
         self.uav.completed_tasks += 1
         self.uav.status = "idle"
-        self.uav.carrying_kg = 0.0
+        # self.uav.carrying_kg = ???
         self.uav.current_task = None
 
-        self._log(f"Arrived depot from demand#{did}, delivered {delivered:.2f}kg. Battery now {self.uav.battery_wh:.1f}Wh")
-        # 到仓库后，检查是否需要充电；否则继续决策
+        self._log(f"Arrived depot from demand#{did}, delivered {delivered:.2f}kg, carrying {self.uav.carrying_kg:.2f}kg. Battery now {self.uav.battery_wh:.1f}Wh")
+        # 到仓库后，不足50%则需要充电；否则继续决策
         if self.uav.battery_wh < 0.5 * self.uav.battery_full_wh:
             self._log("Battery low, start recharge.")
             self.uav.status = "recharging"
@@ -485,7 +493,7 @@ class SimplifiedEnv:
         Args:
             payload: 事件负载
         """
-        self.uav.battery_wh = self.uav.battery_full_wh
+        self.uav.battery_wh += self.uav.battery_full_wh - self.uav.battery_wh  # 冲满
         self.uav.status = "idle"
         self._log(f"Recharge done. Battery full at {self.uav.battery_wh:.1f}Wh")
         # 立即决策下一个任务
